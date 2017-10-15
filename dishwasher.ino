@@ -1,51 +1,37 @@
 // Early alpha, still work in progress!
 
 #include <EEPROM.h>            // Used to store current stage of wash in case of power loss and then restart it from where it stalled
-#include <OneWire.h>           // Required for DS18B20 temperature sensor
-#include <DallasTemperature.h> // Used to read temp from sensor. See https://github.com/milesburton/Arduino-Temperature-Control-Library and http://www.hobbytronics.co.uk/ds18b20-arduino
 #include <Timer.h>             // For real-time operations (no 'delay'-s, please!)
 #define  DEBUG                 // Comment out this line for "production" mode, if you need to reduce SRAM memory usage
-#include "DebugUtils.h"        // Debug library based on http://forum.arduino.cc/index.php?topic=46900.0
-#include <avr/wdt.h>
+//#include "DebugUtils.h"        // Debug library based on http://forum.arduino.cc/index.php?topic=46900.0
+//#include <avr/wdt.h>
 
-#define EEPROM_shift    0  // Arduino's memory has a limited lifetime - datasheet claims it it limited to 10000 writes (although some tests show it is capable to handle millions of writes). To be on the safe side I plan to move the location of my state variables on a yearly basis - I will change it to 50, than to 100, etc. (Remember - Arduino Leonardo's EEPROM is 1024 bytees only!)
+//#define EEPROM_shift    0  // Arduino's memory has a limited lifetime - datasheet claims it it limited to 10000 writes (although some tests show it is capable to handle millions of writes). To be on the safe side I plan to move the location of my state variables on a yearly basis - I will change it to 50, than to 100, etc. (Remember - Arduino Leonardo's EEPROM is 1024 bytees only!)
 
 #define float2long(x)      ((x)>=0?(long)((x)+0.5):(long)((x)-0.5)) // Function later used to display temperatures
 
-#define pin_Salt       12  // Solenoid valve that makes water flow through special chamber with dishwasher salt, which reduces its pH level
-#define pin_MotorPump  11  // Motor pump (this one actually washes dishes by pumping water into carousel on the bottom of water tank).
-#define pin_Inlet      10  // Water inlet valve
-#define pin_Drain       9  // The pump that flushes dirty water to the drain
-#define pin_Cleanser    8  // Releases the lock that holds the cleanser tablet or detergent powder
-#define pin_RinseLiquid 8  // My dishwasher uses single electromagnetic valve to release both detergent and rinse liquid, hence same pin for both
-#define pin_Heater      7  // Heating element. (Note: mine has built-in safety thermostats that cut the line if temperature exceeds 75C)
-#define pin_Pressostat  6  // Pressostat (conducts current when water is in tank; doesn't conduct if tank is empty)
-#define pin_Reset       5  // Connected to RSET pin of Arduino. See http://www.instructables.com/id/two-ways-to-reset-arduino-in-software/?ALLSTEPS
-#define pin_Door        4  // Safety switch on the door. When it releases, we must immediately stop the main motor pump!
-#define pin_Buzzer     14  // Buzzer. Notice that pins 14-16 are available only on Leonardo and MEGA, you don't get these on Uno.
-#define pin_ButtonP    15  // Program selection button
-#define pin_ButtonE    16  // "Eco" button. Don't forget to add two pull-down resistors (10 KOhm) between pins 11 & 12 and GND. See http://arduino.cc/en/Tutorial/Button for details.
-#define pin_Thermostat A0  // My dishwasher had built-in thermostat, but I've found difficult to calibrate it and used digital sensors instead.
-#define pin_LEDE       13  // This LED corresponds to "Eco" button on my dishwasher. Arduino has a bad habit of blinking its built-in LED on pin 13 extensively at startup. I don't want some relay clicking and water flowing just because of this, so I've connected the most harmless peripheral to it.
+#define pin_Salt       13  // Solenoid valve that makes water flow through special chamber with dishwasher salt, which reduces its pH level
+#define pin_MotorPump  12  // Motor pump (this one actually washes dishes by pumping water into carousel on the bottom of water tank).
+#define pin_Inlet      11  // Water inlet valve
+#define pin_Drain       10  // The pump that flushes dirty water to the drain
+#define pin_Cleanser    9  // Releases the lock that holds the cleanser tablet or detergent powder
+#define //pin_RinseLiquid 8  // My dishwasher uses single electromagnetic valve to release both detergent and rinse liquid, hence same pin for both
+#define pin_Heater      8  // Heating element. (Note: mine has built-in safety thermostats that cut the line if temperature exceeds 75C)
+#define pin_Pressostat  7  // Pressostat (conducts current when water is in tank; doesn't conduct if tank is empty)
+#define pin_Reset       6  // Connected to RSET pin of Arduino. See http://www.instructables.com/id/two-ways-to-reset-arduino-in-software/?ALLSTEPS
+#define pin_Door        5  // Safety switch on the door. When it releases, we must immediately stop the main motor pump!
+#define pin_Buzzer     4  // Buzzer. Notice that pins 14-16 are available only on Leonardo and MEGA, you don't get these on Uno.
+#define pin_ButtonP    3  // Program selection button
+//#define pin_ButtonE    16  // "Eco" button. Don't forget to add two pull-down resistors (10 KOhm) between pins 11 & 12 and GND. See http://arduino.cc/en/Tutorial/Button for details.
+#define pin_Thermo A0  // My dishwasher had ntc thermistor 10kom.
+//#define pin_LEDE       13  // This LED corresponds to "Eco" button on my dishwasher. Arduino has a bad habit of blinking its built-in LED on pin 13 extensively at startup. I don't want some relay clicking and water flowing just because of this, so I've connected the most harmless peripheral to it.
 #define pin_LED1       A1  // LEDs 1 to 5 are just regular ones - original dishwasher used them to select one of 5 preinstalled programs.
 #define pin_LED2       A2
 #define pin_LED3       A3
 #define pin_LED4       A4  // Usually, pins A4 and A5 are used for i2c bus. But Arduino Leonardo that I am using for my project uses digital, not analog pins for  SDA and SCL.
 #define pin_LED5       A5
 
-// I have two DS18B20 digital temperature sensors, one has address "280E3CA204000098" and the other - "281DCAA2040000A0"
-// (it is convenient to write the last two digits of sensor's address right on the probe with a Sharpie pen so you won't accidentally switch them...)
-// First one will measure temperature at the dishwasher door, other one - at the bottom (under the water level).
-// Make sure that you attach both with thermal glue, which quickly conducts heat!
 
-// Here are byte arrays used to hold addresses of both DS18B20 thermal sensors:
-uint8_t  thermometerDoor[8]   = { 0x28, 0x0E, 0x3C, 0xA2, 0x04, 0x00, 0x00, 0x98 }; // 1st device on the OneWire bus (with 5V attached to VCC pin of Arduino - see wiring layout on, for example, http://www.strangeparty.com/2010/12/13/arduino-1-wire-temperature-sensors/ as an example.
-uint8_t  thermometerBottom[8] = { 0x28, 0x1D, 0xCA, 0xA2, 0x04, 0x00, 0x00, 0xA0 }; // 2nd device on the bus - 5V and GND pins of this sensor are both connected to GND pin of Arduino.
-
-// Here we create a oneWire instance to communicate with devices that use this protocol
-OneWire oneWire(pin_Thermostat);  // Data line of DS18S20 connects to this pin. Don't forget to add some pullup resistor (4.7 KOhm will do) between this pin and 5V!
-// and then we do pass that oneWire reference to "DallasTemperature":
-DallasTemperature sensors(&oneWire);
 
 // Few more things for buttons. They have a bad habit of 'bouncing', when accidental flickers can be mistekenly interpreted by Arduino as actual key presses. We will need to make sure key is pressed for at least 10ms, or else we'll ignore it.
 const int debounceDelay = 4;  // milliseconds to wait until stable
@@ -95,7 +81,7 @@ void setup() {
   pinMode(pin_Buzzer,      OUTPUT);
   pinMode(pin_Inlet,       OUTPUT);
 
-  pinMode(pin_Thermostat,  INPUT);
+  pinMode(pin_Thermo,  INPUT);
   pinMode(pin_ButtonP,     INPUT); // My wiring has existing resistor,
   pinMode(pin_ButtonE,     INPUT); // so no need to use the one built into Arduino for pull-up.
 
@@ -131,7 +117,7 @@ void setup() {
 
   buzz(4000, 6);
 
-  sensors.begin(); // Starts up the "DallasTemperature" library
+  /*sensors.begin(); // Starts up the "DallasTemperature" library
   sensors.getDeviceCount();
 
   if (!sensors.getAddress(thermometerDoor,   0)) {
@@ -180,7 +166,8 @@ void checkTempSensors() {
     stopOnError();
   }
 }
-
+*/
+  
 void stopOnError() { // Halts execution of the sketch and keeps beeping to indicate that something went wrong.
   // Disables everything:
   shutdownEverything();
@@ -233,11 +220,11 @@ void buzz(long frequency, long length) { // Buzzer code borrowed from http://www
   }
 }
 
-void printTemperature(DeviceAddress deviceAddress) {
+/*-void printTemperature(DeviceAddress deviceAddress) {
   float tempC = sensors.getTempC(deviceAddress);
   Serial1.println(float2long(tempC));
 }
-
+*/
 // long printTemperature(DeviceAddress deviceAddress) { // Prints the temperature for a DS18B20 temperature sensor (in Celsius)
 //  float tempC = sensors.getTempC(deviceAddress);
 //  return float2long(tempC);
@@ -245,7 +232,7 @@ void printTemperature(DeviceAddress deviceAddress) {
 
 void loop() {
 
-  checkTempSensors(); // We query the sensors for current temperatures
+//  checkTempSensors(); // We query the sensors for current temperatures
 
   if (debounce(pin_ButtonP)) {
     buzz(2349, 9);
